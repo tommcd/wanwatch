@@ -1,0 +1,26 @@
+[project]
+name = "wanwatch"
+version = "0.1.0"
+description = "Prove your ISP is dropping the line: lightweight WAN/LAN outage monitoring, analysis, condensing and plotting"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "tommcd" }]
+requires-python = ">=3.10"
+dependencies = ["matplotlib>=3.8"]
+keywords = ["monitoring", "wan", "outage", "isp", "uptime", "networking"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Networking :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/tommcd/wanwatch"
+
+[project.scripts]
+wanwatch = "wanwatch.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

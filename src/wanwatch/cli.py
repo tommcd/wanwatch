@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""wanwatch - analyze, condense, compact and plot wan_monitor logs.
+
+
+The raw log (written by wan_monitor.sh) has lines:
+    timestamp,lan,wan,event        e.g.  2026-07-14 20:11:32,UP,UP,heartbeat
+
+The condensed format produced here has lines:
+    start,end,duration_s,lan,wan,kind      kind = state | gap
+
+Commands (run with uv):
+    wanwatch analyze  wan_log.csv [more files...] [--exclude "A..B"]
+    wanwatch condense wan_log.csv -o wan_condensed.csv
+    wanwatch compact  wan_log.csv --condensed wan_condensed.csv
+    wanwatch plot     wan_condensed.csv wan_log.csv -o wan_timeline.png
+
+'compact' safely condenses the live file in place while the monitor is
+running: it renames the raw file aside (atomic; the monitor's next append
+recreates it, since each append re-opens the file), condenses the rotated
+chunk, merges it into the condensed archive, and deletes the chunk.
+Adjacent same-state intervals across compactions are stitched together,
+so nothing is lost. All commands accept raw and condensed files
+interchangeably and auto-detect the format.
+"""
+
+import argparse
+import os
+import statistics
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime
+
+TS_FMT = "%Y-%m-%d %H:%M:%S"
+DEFAULT_GAP_S = 180  # samples further apart than this = monitoring gap
+
+
+@dataclass
+class Interval:
+    start: datetime
+    end: datetime
+    lan: str
+    wan: str
+    kind: str  # "state" or "gap"
+
+    @property
+    def dur(self) -> float:
+        return (self.end - self.start).total_seconds()
+
+    @property
+    def state(self):
+        return (self.lan, self.wan, self.kind)
+
+
+def _pt(s: str) -> datetime:
+    return datetime.strptime(s.strip(), TS_FMT)
+
+
+def fmt_dur(seconds: float) -> str:
+    seconds = int(round(seconds))
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    out = []
+    if d:
+        out.append(f"{d}d")
+    if h:
+        out.append(f"{h}h")
+    if m:
+        out.append(f"{m}m")
+    if s or not out:
+        out.append(f"{s}s")
+    return " ".join(out)
+
+
+# ---------------------------------------------------------------- parsing
+
+def parse_raw_lines(lines) -> list:
+    """Raw monitor samples -> [(ts, lan, wan, event)]. Tolerates no header."""
+    samples = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("timestamp"):
+            continue
+        parts = line.split(",")
+        if len(parts) < 4:
+            continue
+        try:
+            ts = _pt(parts[0])
+        except ValueError:
+            continue
+        samples.append((ts, parts[1].strip(), parts[2].strip(), parts[3].strip()))
+    return samples
+
+
+def samples_to_intervals(samples, gap_s=DEFAULT_GAP_S) -> list:
+    """Collapse consecutive same-state samples into intervals; emit gap
+    intervals where sampling paused. Samples with wan '-' (monitor_started
+    markers) carry no state; their timestamp still bounds gaps."""
+    ivs: list[Interval] = []
+    cur: Interval | None = None
+    prev_ts: datetime | None = None
+
+    for ts, lan, wan, _event in samples:
+        if prev_ts is not None and (ts - prev_ts).total_seconds() > gap_s:
+            if cur is not None:
+                cur.end = prev_ts
+                ivs.append(cur)
+                cur = None
+            ivs.append(Interval(prev_ts, ts, "-", "-", "gap"))
+        prev_ts = ts
+        if wan == "-":            # startup marker: no state information
+            continue
+        if cur is not None and (lan, wan) != (cur.lan, cur.wan):
+            cur.end = ts
+            ivs.append(cur)
+            cur = None
+        if cur is None:
+            cur = Interval(ts, ts, lan, wan, "state")
+    if cur is not None and prev_ts is not None:
+        cur.end = prev_ts
+        ivs.append(cur)
+    return [iv for iv in ivs if iv.kind == "gap" or iv.dur >= 0]
+
+
+def parse_condensed_lines(lines) -> list:
+    ivs = []
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("start,"):
+            continue
+        parts = line.split(",")
+        if len(parts) < 6:
+            continue
+        try:
+            ivs.append(Interval(_pt(parts[0]), _pt(parts[1]),
+                                parts[3].strip(), parts[4].strip(),
+                                parts[5].strip()))
+        except ValueError:
+            continue
+    return ivs
+
+
+def load_any(path: str, gap_s=DEFAULT_GAP_S) -> list:
+    """Auto-detect raw vs condensed and return intervals."""
+    with open(path, newline="", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("start,") or line.count(",") >= 5:
+            return parse_condensed_lines(lines)
+        return samples_to_intervals(parse_raw_lines(lines), gap_s)
+    return []
+
+
+def merge_intervals(ivs: list, join_s=DEFAULT_GAP_S) -> list:
+    """Sort and stitch adjacent same-state intervals (across compactions)."""
+    ivs = sorted(ivs, key=lambda i: i.start)
+    out: list[Interval] = []
+    for iv in ivs:
+        if (out and iv.state == out[-1].state
+                and (iv.start - out[-1].end).total_seconds() <= join_s):
+            out[-1].end = max(out[-1].end, iv.end)
+        else:
+            out.append(Interval(iv.start, iv.end, iv.lan, iv.wan, iv.kind))
+    return out
+
+
+def write_condensed(path: str, ivs: list) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        f.write("start,end,duration_s,lan,wan,kind\n")
+        for iv in ivs:
+            f.write(f"{iv.start.strftime(TS_FMT)},{iv.end.strftime(TS_FMT)},"
+                    f"{int(iv.dur)},{iv.lan},{iv.wan},{iv.kind}\n")
+
+
+# ---------------------------------------------------------------- exclude
+
+def parse_excludes(specs) -> list:
+    """--exclude 'YYYY-MM-DD HH:MM:SS..YYYY-MM-DD HH:MM:SS' (repeatable)."""
+    out = []
+    for spec in specs or []:
+        try:
+            a, b = spec.split("..")
+            out.append((_pt(a), _pt(b)))
+        except ValueError:
+            sys.exit(f"bad --exclude window: {spec!r} "
+                     f"(expected 'A..B' with '{TS_FMT}' timestamps)")
+    return out
+
+
+def overlaps_exclude(iv: Interval, excludes) -> bool:
+    return any(iv.start < b and iv.end > a for a, b in excludes)
+
+
+# ---------------------------------------------------------------- analyze
+
+def cmd_analyze(args):
+    ivs = merge_intervals(
+        [iv for p in args.files for iv in load_any(p, args.gap)], args.gap)
+    if not ivs:
+        sys.exit("no intervals found")
+    excludes = parse_excludes(args.exclude)
+
+    first, last = ivs[0].start, ivs[-1].end
+    span = (last - first).total_seconds()
+    gaps = [iv for iv in ivs if iv.kind == "gap"]
+    gap_total = sum(g.dur for g in gaps)
+
+    outs_all = [iv for iv in ivs if iv.kind == "state"
+                and iv.lan == "UP" and iv.wan == "DOWN"]
+    excluded = [iv for iv in outs_all if overlaps_exclude(iv, excludes)]
+    outages = [iv for iv in outs_all if iv not in excluded]
+    lan_down = [iv for iv in ivs if iv.kind == "state" and iv.lan == "DOWN"]
+
+    print(f"Coverage : {first:{'%Y-%m-%d %H:%M:%S'}}  ->  "
+          f"{last:{'%Y-%m-%d %H:%M:%S'}}   (span {fmt_dur(span)})")
+    print(f"Monitored: {fmt_dur(span - gap_total)}  "
+          f"({(span - gap_total) / span * 100:.1f}% of span)")
+    print(f"Gaps     : {len(gaps)} totalling {fmt_dur(gap_total)}")
+    for g in gaps:
+        print(f"    GAP  {g.start:%Y-%m-%d %H:%M:%S} -> "
+              f"{g.end:%H:%M:%S}  ({fmt_dur(g.dur)})")
+
+    print(f"\nWAN OUTAGES (lan UP, wan DOWN): {len(outages)}")
+    if outages:
+        durs = [o.dur for o in outages]
+        print(f"  total downtime : {fmt_dur(sum(durs))}")
+        print(f"  duration       : min {fmt_dur(min(durs))} / "
+              f"median {fmt_dur(statistics.median(durs))} / "
+              f"max {fmt_dur(max(durs))}")
+
+        per_day: dict = {}
+        for o in outages:
+            d = per_day.setdefault(o.start.date(), [0, 0.0])
+            d[0] += 1
+            d[1] += o.dur
+        print("\n  per-day:")
+        print("    date        drops   downtime")
+        for day in sorted(per_day):
+            n, t = per_day[day]
+            print(f"    {day}  {n:5d}   {fmt_dur(t)}")
+
+        by_hour = [0] * 24
+        for o in outages:
+            by_hour[o.start.hour] += 1
+        print("\n  by hour of day:")
+        for h, n in enumerate(by_hour):
+            if n:
+                print(f"    {h:02d}:00-{h:02d}:59  {'#' * n} {n}")
+
+        print("\n  full list:")
+        for o in outages:
+            print(f"    {o.start:%Y-%m-%d %H:%M:%S}  "
+                  f"down {fmt_dur(o.dur):>8}")
+
+    if excluded:
+        print(f"\nEXCLUDED (deliberate downtime windows): {len(excluded)} "
+              f"outage intervals, {fmt_dur(sum(o.dur for o in excluded))} "
+              f"- not counted above")
+    if lan_down:
+        print(f"\nLAN-DOWN periods (monitor could not reach the router): "
+              f"{len(lan_down)}, total {fmt_dur(sum(i.dur for i in lan_down))}")
+        for i in lan_down:
+            print(f"    {i.start:%Y-%m-%d %H:%M:%S}  lan={i.lan} wan={i.wan}  "
+                  f"({fmt_dur(i.dur)})")
+
+
+# --------------------------------------------------------------- condense
+
+def cmd_condense(args):
+    ivs = merge_intervals(
+        [iv for p in args.files for iv in load_any(p, args.gap)], args.gap)
+    write_condensed(args.output, ivs)
+    print(f"{sum(1 for _ in ivs)} intervals -> {args.output}")
+
+
+# ---------------------------------------------------------------- compact
+
+def cmd_compact(args):
+    raw, cond = args.file, args.condensed
+    if not os.path.exists(raw):
+        sys.exit(f"{raw}: not found (nothing to compact)")
+    work = f"{raw}.compacting.{os.getpid()}.{int(time.time())}"
+
+    for attempt in range(20):
+        try:
+            os.rename(raw, work)
+            break
+        except PermissionError:      # writer holds it for a few ms mid-append
+            time.sleep(0.25)
+    else:
+        sys.exit("could not rotate the raw file (writer busy); try again")
+
+    time.sleep(0.5)  # let any append that opened the old handle finish
+
+    with open(work, newline="", encoding="utf-8", errors="replace") as f:
+        new_ivs = samples_to_intervals(parse_raw_lines(f.readlines()), args.gap)
+
+    old_ivs = []
+    if os.path.exists(cond):
+        with open(cond, newline="", encoding="utf-8", errors="replace") as f:
+            old_ivs = parse_condensed_lines(f.readlines())
+
+    merged = merge_intervals(old_ivs + new_ivs, args.gap)
+    tmp = cond + ".tmp"
+    write_condensed(tmp, merged)
+    os.replace(tmp, cond)
+    os.remove(work)
+
+    print(f"compacted {len(new_ivs)} new intervals into {cond} "
+          f"({len(merged)} total). Raw file will be recreated by the "
+          f"monitor's next write.")
+
+
+# ------------------------------------------------------------------- plot
+
+def cmd_plot(args):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    ivs = merge_intervals(
+        [iv for p in args.files for iv in load_any(p, args.gap)], args.gap)
+    if not ivs:
+        sys.exit("no intervals found")
+
+    colors = {
+        ("UP", "UP"): "#2e7d32",     # healthy
+        ("UP", "DOWN"): "#c62828",   # WAN outage - the money colour
+        ("DOWN", "UP"): "#ef6c00",   # router unreachable (artefact/local)
+        ("DOWN", "DOWN"): "#6a1b9a", # machine/LAN fully dark
+    }
+    MIN_VISUAL_S = args.min_width * 60
+
+    fig, ax = plt.subplots(figsize=(16, 3.4))
+    for iv in ivs:
+        if iv.kind == "gap":
+            color = "#bdbdbd"
+        else:
+            color = colors.get((iv.lan, iv.wan), "#000000")
+        start = mdates.date2num(iv.start)
+        # widen very short non-healthy blocks so they are visible at week scale
+        dur_s = iv.dur
+        if iv.kind == "state" and (iv.lan, iv.wan) != ("UP", "UP"):
+            dur_s = max(dur_s, MIN_VISUAL_S)
+        width = dur_s / 86400.0
+        ax.broken_barh([(start, width)], (0, 1), facecolors=color,
+                       edgecolors="none")
+
+    n_out = sum(1 for iv in ivs if iv.kind == "state"
+                and iv.lan == "UP" and iv.wan == "DOWN")
+    ax.set_ylim(0, 1)
+    ax.set_yticks([])
+    ax.xaxis.set_major_locator(mdates.DayLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %d %b"))
+    ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=[6, 12, 18]))
+    ax.grid(True, which="both", axis="x", alpha=0.3)
+    ax.set_title(f"WAN availability - {n_out} WAN outages "
+                 f"(red; short drops widened to {args.min_width} min for "
+                 f"visibility - true durations in 'analyze')")
+    ax.legend(handles=[
+        Patch(color="#2e7d32", label="up"),
+        Patch(color="#c62828", label="WAN down (LAN up)"),
+        Patch(color="#ef6c00", label="router unreachable"),
+        Patch(color="#6a1b9a", label="all down"),
+        Patch(color="#bdbdbd", label="not monitored"),
+    ], loc="upper left", bbox_to_anchor=(0, -0.15), ncol=5, frameon=False)
+    fig.tight_layout()
+    fig.savefig(args.output, dpi=150)
+    print(f"wrote {args.output}")
+
+
+# ------------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--gap", type=int, default=DEFAULT_GAP_S,
+                    help="seconds between samples that counts as a "
+                         "monitoring gap (default 180)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("analyze", help="print outage statistics")
+    p.add_argument("files", nargs="+")
+    p.add_argument("--exclude", action="append", metavar="'A..B'",
+                   help=f"exclude a deliberate-downtime window, "
+                        f"timestamps as '{TS_FMT}..{TS_FMT}' (repeatable)")
+    p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("condense", help="write a condensed interval file")
+    p.add_argument("files", nargs="+")
+    p.add_argument("-o", "--output", default="wan_condensed.csv")
+    p.set_defaults(func=cmd_condense)
+
+    p = sub.add_parser("compact",
+                       help="safely condense the LIVE raw log in place")
+    p.add_argument("file", help="the live raw log")
+    p.add_argument("--condensed", default="wan_condensed.csv",
+                   help="condensed archive to merge into")
+    p.set_defaults(func=cmd_compact)
+
+    p = sub.add_parser("plot", help="render an availability timeline PNG")
+    p.add_argument("files", nargs="+")
+    p.add_argument("-o", "--output", default="wan_timeline.png")
+    p.add_argument("--min-width", type=float, default=2.0,
+                   help="minimum visual width for outage blocks, minutes "
+                        "(default 2)")
+    p.set_defaults(func=cmd_plot)
+
+    args = ap.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

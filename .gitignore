@@ -1,0 +1,14 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+
+# wanwatch data - never commit your logs
+wan_log.csv
+wan_condensed.csv
+*.compacting.*
+wan_timeline.png
+wan_monitor.err

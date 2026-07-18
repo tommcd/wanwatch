@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# wanctl - lifecycle manager for wan_monitor.sh
+#
+#   wanctl start            run the monitor in the background
+#   wanctl stop             stop all running monitors
+#   wanctl status           running? PIDs, log freshness, last lines
+#   wanctl restart          stop + start
+#   wanctl tail             follow the log live
+#   wanctl task-install     (Windows) install the Task Scheduler watchdog
+#   wanctl task-uninstall   (Windows) remove it
+#   wanctl task-status      (Windows) show scheduled-task state
+#
+# Config via environment (or edit the defaults below):
+#   WANWATCH_LOG     log file        (default: ~/wan_log.csv)
+#   WANWATCH_ROUTER  router LAN IP   (default: 192.168.1.254)
+
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MONITOR="$SCRIPT_DIR/wan_monitor.sh"
+LOG="${WANWATCH_LOG:-$HOME/wan_log.csv}"
+IS_WIN=false
+[[ "$(uname -s)" == MINGW* ]] && IS_WIN=true
+
+pids() {
+    if $IS_WIN; then
+        powershell -NoProfile -Command \
+          "Get-CimInstance Win32_Process -Filter \"Name='bash.exe'\" |
+           Where-Object { \$_.CommandLine -like '*wan_monitor*' } |
+           Select-Object -ExpandProperty ProcessId" 2>/dev/null | tr -d '\r'
+    else
+        pgrep -f '[w]an_monitor\.sh' 2>/dev/null
+    fi
+}
+
+freshness() {
+    [[ -f "$LOG" ]] || { echo "log file not found: $LOG"; return; }
+    local last ts_epoch now age
+    last=$(tail -1 "$LOG")
+    ts_epoch=$(date -d "${last%%,*}" +%s 2>/dev/null) || { echo "last line: $last"; return; }
+    now=$(date +%s)
+    age=$(( now - ts_epoch ))
+    echo "last sample: ${age}s ago  ($last)"
+    if (( age > 180 )); then
+        echo "WARNING: log is stale (>3 min) - monitor may not be sampling"
+    fi
+}
+
+cmd_start() {
+    local p; p=$(pids)
+    if [[ -n "$p" ]]; then
+        echo "already running (PID(s): $(echo $p | tr '\n' ' '))"
+        exit 0
+    fi
+    nohup "$MONITOR" "$LOG" >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    sleep 1
+    p=$(pids)
+    if [[ -n "$p" ]]; then
+        echo "started (PID(s): $(echo $p | tr '\n' ' ')), logging to $LOG"
+    else
+        echo "failed to start - try running '$MONITOR $LOG' in the foreground to see why" >&2
+        exit 1
+    fi
+}
+
+cmd_stop() {
+    local p; p=$(pids)
+    if [[ -z "$p" ]]; then
+        echo "not running"
+        return
+    fi
+    if $IS_WIN; then
+        for pid in $p; do
+            powershell -NoProfile -Command \
+              "Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue" >/dev/null
+        done
+    else
+        kill $p 2>/dev/null
+    fi
+    sleep 1
+    if [[ -n "$(pids)" ]]; then
+        echo "some processes survived; retrying with force"
+        $IS_WIN || kill -9 $(pids) 2>/dev/null
+    fi
+    echo "stopped"
+    if $IS_WIN; then
+        echo "note: if the Task Scheduler watchdog is installed, it will restart"
+        echo "the monitor within 5 minutes. Use 'wanctl task-uninstall' to stop it"
+        echo "permanently."
+    fi
+}
+
+cmd_status() {
+    local p; p=$(pids)
+    if [[ -n "$p" ]]; then
+        echo "RUNNING  (PID(s): $(echo $p | tr '\n' ' '))"
+    else
+        echo "NOT RUNNING"
+    fi
+    freshness
+    if $IS_WIN; then
+        powershell -NoProfile -Command \
+          "try { Get-ScheduledTask -TaskName 'WAN Monitor' -ErrorAction Stop |
+                 Get-ScheduledTaskInfo |
+                 Select-Object LastRunTime, LastTaskResult, NextRunTime | Format-List
+           } catch { Write-Host 'scheduled task: not installed' }" | tr -d '\r'
+    fi
+}
+
+cmd_tail() { exec tail -f "$LOG"; }
+
+cmd_task_install() {
+    $IS_WIN || { echo "task-install is Windows-only; use cron/systemd on Linux" >&2; exit 1; }
+    powershell -NoProfile -ExecutionPolicy Bypass \
+        -File "$(cygpath -w "$SCRIPT_DIR/setup_wan_task.ps1")" \
+        -MonitorPath "$(cygpath -w "$MONITOR")" \
+        -LogPath "$(cygpath -w "$LOG")"
+}
+
+cmd_task_uninstall() {
+    $IS_WIN || { echo "Windows-only" >&2; exit 1; }
+    powershell -NoProfile -Command \
+      "Unregister-ScheduledTask -TaskName 'WAN Monitor' -Confirm:\$false" &&
+      echo "scheduled task removed"
+}
+
+cmd_task_status() {
+    $IS_WIN || { echo "Windows-only" >&2; exit 1; }
+    powershell -NoProfile -Command \
+      "Get-ScheduledTask -TaskName 'WAN Monitor' | Get-ScheduledTaskInfo" | tr -d '\r'
+}
+
+case "${1:-}" in
+    start)          cmd_start ;;
+    stop)           cmd_stop ;;
+    status)         cmd_status ;;
+    restart)        cmd_stop; sleep 1; cmd_start ;;
+    tail)           cmd_tail ;;
+    task-install)   cmd_task_install ;;
+    task-uninstall) cmd_task_uninstall ;;
+    task-status)    cmd_task_status ;;
+    *) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
