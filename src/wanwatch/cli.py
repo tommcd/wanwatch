@@ -143,9 +143,6 @@ def parse_condensed_lines(lines) -> list:
 
 def load_any(path: str, gap_s=DEFAULT_GAP_S) -> list:
     """Auto-detect raw vs condensed and return intervals."""
-    if not os.path.exists(path):
-        print(f"warning: {path} not found - skipping", file=sys.stderr)
-        return []
     with open(path, newline="", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
     for line in lines:
@@ -160,9 +157,14 @@ def load_any(path: str, gap_s=DEFAULT_GAP_S) -> list:
 
 def merge_intervals(ivs: list, join_s=DEFAULT_GAP_S) -> list:
     """Sort and stitch adjacent same-state intervals (across compactions)."""
-    ivs = sorted(ivs, key=lambda i: i.start)
+    ivs = sorted(ivs, key=lambda i: (i.start, i.end))
+    seen = set()
     out: list[Interval] = []
     for iv in ivs:
+        key = (iv.start, iv.end, iv.state)
+        if key in seen:
+            continue
+        seen.add(key)
         if (out and iv.state == out[-1].state
                 and (iv.start - out[-1].end).total_seconds() <= join_s):
             out[-1].end = max(out[-1].end, iv.end)
@@ -326,55 +328,96 @@ def cmd_plot(args):
     import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
+    from datetime import timedelta, time as dtime
 
     ivs = merge_intervals(
         [iv for p in args.files for iv in load_any(p, args.gap)], args.gap)
     if not ivs:
         sys.exit("no intervals found")
 
-    colors = {
-        ("UP", "UP"): "#2e7d32",     # healthy
-        ("UP", "DOWN"): "#c62828",   # WAN outage - the money colour
-        ("DOWN", "UP"): "#ef6c00",   # router unreachable (artefact/local)
-        ("DOWN", "DOWN"): "#6a1b9a", # machine/LAN fully dark
-    }
-    MIN_VISUAL_S = args.min_width * 60
+    C_UP, C_OUT, C_LAN, C_ALL, C_GAP = ("#c8e6c9", "#c62828",
+                                        "#ef6c00", "#6a1b9a", "#e0e0e0")
 
-    fig, ax = plt.subplots(figsize=(16, 3.4))
-    for iv in ivs:
+    def color_of(iv):
         if iv.kind == "gap":
-            color = "#bdbdbd"
-        else:
-            color = colors.get((iv.lan, iv.wan), "#000000")
-        start = mdates.date2num(iv.start)
-        # widen very short non-healthy blocks so they are visible at week scale
-        dur_s = iv.dur
-        if iv.kind == "state" and (iv.lan, iv.wan) != ("UP", "UP"):
-            dur_s = max(dur_s, MIN_VISUAL_S)
-        width = dur_s / 86400.0
-        ax.broken_barh([(start, width)], (0, 1), facecolors=color,
-                       edgecolors="none")
+            return C_GAP
+        if iv.lan == "UP" and iv.wan == "DOWN":
+            return C_OUT
+        if iv.lan == "DOWN" and iv.wan == "DOWN":
+            return C_ALL
+        if iv.lan == "DOWN":
+            return C_LAN
+        return C_UP
 
     n_out = sum(1 for iv in ivs if iv.kind == "state"
                 and iv.lan == "UP" and iv.wan == "DOWN")
-    ax.set_ylim(0, 1)
-    ax.set_yticks([])
-    ax.xaxis.set_major_locator(mdates.DayLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%a %d %b"))
-    ax.xaxis.set_minor_locator(mdates.HourLocator(byhour=[6, 12, 18]))
-    ax.grid(True, which="both", axis="x", alpha=0.3)
-    ax.set_title(f"WAN availability - {n_out} WAN outages "
-                 f"(red; short drops widened to {args.min_width} min for "
-                 f"visibility - true durations in 'analyze')")
-    ax.legend(handles=[
-        Patch(color="#2e7d32", label="up"),
-        Patch(color="#c62828", label="WAN down (LAN up)"),
-        Patch(color="#ef6c00", label="router unreachable"),
-        Patch(color="#6a1b9a", label="all down"),
-        Patch(color="#bdbdbd", label="not monitored"),
-    ], loc="upper left", bbox_to_anchor=(0, -0.15), ncol=5, frameon=False)
-    fig.tight_layout()
-    fig.savefig(args.output, dpi=150)
+
+    fig, (ax1, ax2) = plt.subplots(
+        2, 1, figsize=(16, 8),
+        gridspec_kw={"height_ratios": [1, 2.6], "hspace": 0.35})
+
+    # ---- panel 1: full-span timeline (context) ----------------------------
+    for iv in ivs:
+        dur_s = iv.dur
+        if iv.kind == "state" and (iv.lan, iv.wan) != ("UP", "UP"):
+            dur_s = max(dur_s, args.min_width * 60)
+        ax1.broken_barh([(mdates.date2num(iv.start), dur_s / 86400.0)],
+                        (0, 1), facecolors=color_of(iv), edgecolors="none")
+    ax1.set_ylim(0, 1)
+    ax1.set_yticks([])
+    ax1.xaxis.set_major_locator(mdates.DayLocator())
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%a %d"))
+    ax1.grid(True, axis="x", alpha=0.3)
+    ax1.set_title(f"Full span - {n_out} WAN outages")
+
+    # ---- panel 2: one row per day, midnight to midnight -------------------
+    def split_by_day(iv):
+        cur = iv.start
+        while cur.date() < iv.end.date():
+            midnight = datetime.combine(cur.date() + timedelta(days=1),
+                                        dtime.min)
+            yield cur.date(), cur, midnight
+            cur = midnight
+        if cur < iv.end or iv.start.date() == iv.end.date():
+            yield cur.date(), cur, iv.end
+
+    days = sorted({d for iv in ivs for d, _, _ in split_by_day(iv)})
+    row = {d: i for i, d in enumerate(days)}
+    DAY_MIN_S = max(args.min_width, 6) * 60   # visibility floor on 24h axis
+
+    ax2.axvspan(17, 22, color="#fff8e1", zorder=0)  # evening band
+    for iv in ivs:
+        col = color_of(iv)
+        for d, a, b in split_by_day(iv):
+            x = a.hour + a.minute / 60 + a.second / 3600
+            w = (b - a).total_seconds() / 3600
+            if iv.kind == "state" and (iv.lan, iv.wan) != ("UP", "UP"):
+                w = max(w, DAY_MIN_S / 3600)
+            y = row[d]
+            ax2.broken_barh([(x, w)], (y + 0.08, 0.84),
+                            facecolors=col, edgecolors="none", zorder=2)
+
+    ax2.set_ylim(len(days), 0)                       # first day on top
+    ax2.set_yticks([i + 0.5 for i in range(len(days))])
+    ax2.set_yticklabels([d.strftime("%a %d %b") for d in days])
+    ax2.set_xlim(0, 24)
+    ax2.set_xticks(range(0, 25, 2))
+    ax2.set_xticklabels([f"{h:02d}:00" for h in range(0, 25, 2)])
+    ax2.grid(True, axis="x", alpha=0.3, zorder=1)
+    ax2.set_title(f"By day and hour - outage blocks widened to "
+                  f"{DAY_MIN_S // 60} min minimum for visibility "
+                  f"(true durations in 'analyze'); shaded band = 17:00-22:00")
+
+    fig.suptitle(f"WAN availability - {n_out} spontaneous WAN outages "
+                 f"(router reachable throughout)", fontsize=13)
+    fig.legend(handles=[
+        Patch(color=C_UP, label="up"),
+        Patch(color=C_OUT, label="WAN down (LAN up)"),
+        Patch(color=C_LAN, label="router unreachable"),
+        Patch(color=C_ALL, label="all down (incl. deliberate power-offs)"),
+        Patch(color=C_GAP, label="not monitored"),
+    ], loc="lower center", ncol=5, frameon=False)
+    fig.savefig(args.output, dpi=150, bbox_inches="tight")
     print(f"wrote {args.output}")
 
 
