@@ -26,6 +26,7 @@ ts()    { date '+%Y-%m-%d %H:%M:%S'; }
 log()   { echo "$(ts),$1,$2,$3" >> "$LOG"; }
 
 [[ -f "$LOG" ]] || echo "timestamp,lan,wan,event" > "$LOG"
+echo "# wanwatch-monitor host=$(hostname) router=$ROUTER wan=$WAN_HOST_1,$WAN_HOST_2 interval=${INTERVAL}s tz=$(date +%z)" >> "$LOG"
 
 prev_lan=""
 prev_wan=""
@@ -39,6 +40,8 @@ while true; do
     wan=DOWN
     if [[ $(check "$WAN_HOST_1") == UP ]] || [[ $(check "$WAN_HOST_2") == UP ]]; then
         wan=UP
+    elif curl -s -m 3 -o /dev/null "https://1.1.1.1/" 2>/dev/null; then
+        wan=UP_TCP   # HTTPS reachable though ICMP failed: filtering, not outage
     fi
 
     now=$(date +%s)

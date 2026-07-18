@@ -1,6 +1,6 @@
 # wanwatch
 
-Prove your ISP is dropping the line.
+Document periods when your router stays reachable but the internet is not - evidence for the conversation with your ISP.
 
 `wanwatch` is a tiny two-part toolkit born from a real fault-hunt: an
 FTTH connection that silently dropped its WAN session dozens of times per
@@ -11,9 +11,10 @@ evidence that ends that conversation.
 * **`wan_monitor.sh`** - a dependency-free bash sampler. Every 10 seconds it
   pings your router (LAN) and two public anycast hosts (WAN) and appends a
   CSV row on every state change, every sample during an outage, and a
-  one-minute heartbeat. The key signal is `UP,DOWN`: *your equipment is
-  fine and the internet is gone* - the ISP's problem, timestamped to
-  within 10 seconds.
+  one-minute heartbeat. The key signal is `UP,DOWN`: *the router answered while
+  external targets did not* - strong grounds for a WAN-side
+  investigation, timestamped to within ~10-16 seconds (up to three
+  2-second probes plus a 10-second sleep per cycle).
 * **`wanwatch`** - a Python CLI that turns the log into statistics, a
   losslessly condensed interval file you can attach to a complaint email,
   and an availability timeline PNG.
@@ -99,7 +100,7 @@ timestamp,lan,wan,event
 | lan | wan | meaning |
 |-----|-----|---------|
 | UP  | UP    | healthy |
-| UP  | DOWN  | **WAN outage - your kit is fine, the line is not** |
+| UP  | DOWN  | **router answered, external targets did not - WAN-side event** |
 | DOWN| UP    | router ignored a ping (usually an artefact: routers deprioritise ICMP to themselves under load) |
 | DOWN| DOWN  | monitor host lost the LAN (machine asleep, Wi-Fi blip) |
 

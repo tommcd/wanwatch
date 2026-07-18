@@ -1,7 +1,7 @@
 [project]
 name = "wanwatch"
 version = "0.1.0"
-description = "Prove your ISP is dropping the line: lightweight WAN/LAN outage monitoring, analysis, condensing and plotting"
+description = "Document when your router stays reachable but the internet is not: lightweight WAN/LAN outage monitoring, analysis, condensing and plotting"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "tommcd" }]

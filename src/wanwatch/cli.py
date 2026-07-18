@@ -143,6 +143,9 @@ def parse_condensed_lines(lines) -> list:
 
 def load_any(path: str, gap_s=DEFAULT_GAP_S) -> list:
     """Auto-detect raw vs condensed and return intervals."""
+    if not os.path.exists(path):
+        print(f"warning: {path} not found - skipping", file=sys.stderr)
+        return []
     with open(path, newline="", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
     for line in lines:
