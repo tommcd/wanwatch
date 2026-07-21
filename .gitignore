@@ -12,3 +12,8 @@ wan_condensed.csv
 *.compacting.*
 wan_timeline.png
 wan_monitor.err
+
+# Evidence pack - keep on disk, never commit
+analysis.txt
+evidence.sha256
+wan_status.html
