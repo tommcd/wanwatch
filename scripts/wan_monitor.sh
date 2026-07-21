@@ -6,7 +6,11 @@
 #
 # Usage:  ./wan_monitor.sh [logfile]
 
+# Optional local config (heartbeat URL etc.) - never committed
+[[ -f "$HOME/.wanwatch.env" ]] && source "$HOME/.wanwatch.env"
+
 ROUTER="${WANWATCH_ROUTER:-192.168.1.254}"
+PING_URL="${WANWATCH_PING_URL:-}"   # dead-man's-switch heartbeat (empty = off)
 WAN_HOST_1="1.1.1.1"        # Cloudflare
 WAN_HOST_2="8.8.8.8"        # Google - WAN is UP if either replies
 INTERVAL=10                  # seconds between samples
@@ -31,6 +35,7 @@ echo "# wanwatch-monitor host=$(hostname) router=$ROUTER wan=$WAN_HOST_1,$WAN_HO
 prev_lan=""
 prev_wan=""
 last_beat=$(date +%s)
+last_ping=0
 
 log "$(check "$ROUTER")" "-" "monitor_started"
 
@@ -56,6 +61,12 @@ while true; do
     elif (( now - last_beat >= HEARTBEAT )); then
         log "$lan" "$wan" "heartbeat"
         last_beat=$now
+    fi
+
+    # heartbeat to the hosted dead-man's switch: sent only while the
+    # WAN is up, so silence there = connection (or machine) down
+    if [[ -n "$PING_URL" && "$wan" == UP ]] && (( now - last_ping >= 60 )); then
+        curl -sfm 5 "$PING_URL" >/dev/null 2>&1 && last_ping=$now
     fi
 
     sleep "$INTERVAL"

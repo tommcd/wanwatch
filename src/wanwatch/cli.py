@@ -424,6 +424,163 @@ def cmd_plot(args):
     print(f"wrote {args.output}")
 
 
+
+# ----------------------------------------------------------------- report
+
+_STALE_JS = """
+<script>
+(function(){
+ var gen=__EPOCH__*1000, lim=20*60*1000;
+ if(Date.now()-gen>lim){
+   var b=document.querySelector(".badge");
+   b.textContent="NO FRESH DATA";
+   b.style.background="#616161";
+   document.querySelector(".detail").textContent=
+     "Nothing published since "+new Date(gen).toLocaleString()+
+     " - the connection or the monitoring machine is offline."+
+     " For this page, silence IS the outage signal"+
+     " (the live badge above, if present, updates independently).";
+ }
+}());
+</script>
+"""
+
+_REPORT_STYLE = """
+<style>
+ body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:2rem auto;
+      max-width:760px;padding:0 1rem;color:#212121;background:#fafafa}
+ .badge{display:inline-block;padding:.45rem 1.1rem;border-radius:8px;
+        color:#fff;font-size:1.5rem;font-weight:700}
+ .detail{color:#616161;margin:.4rem 0 1.4rem}
+ .cards{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1.4rem}
+ .card{background:#fff;border:1px solid #e0e0e0;border-radius:8px;
+       padding:.8rem 1rem;flex:1;min-width:150px}
+ .card b{display:block;font-size:1.25rem}
+ .card span{color:#757575;font-size:.85rem}
+ h3{margin:1.4rem 0 .4rem;font-size:1rem;color:#424242}
+ table{border-collapse:collapse;width:100%;background:#fff;
+       border:1px solid #e0e0e0;border-radius:8px}
+ td,th{padding:.4rem .8rem;border-bottom:1px solid #eee;text-align:left;
+       font-size:.9rem}
+ .note{color:#9e9e9e;font-size:.8rem;margin-top:1.6rem}
+</style>
+"""
+
+
+def _svg_bars(vals, w=340, h=46, color="#c62828"):
+    mx = max(vals) if vals and max(vals) > 0 else 1
+    bw = w / max(len(vals), 1)
+    parts = []
+    for i, v in enumerate(vals):
+        bh = 0 if v <= 0 else max(2.0, h * v / mx)
+        parts.append(f'<rect x="{i * bw + 1:.1f}" y="{h - bh:.1f}" '
+                     f'width="{max(bw - 2, 1):.1f}" height="{bh:.1f}" '
+                     f'rx="1" fill="{color}"/>')
+    return (f'<svg width="{w}" height="{h}" '
+            f'style="background:#eeeeee;border-radius:4px">'
+            f'{"".join(parts)}</svg>')
+
+
+def cmd_report(args):
+    """Render a self-contained, read-only HTML status page."""
+    from datetime import timedelta
+
+    ivs = merge_intervals(
+        [iv for p in args.files for iv in load_any(p, args.gap)], args.gap)
+    if not ivs:
+        sys.exit("no intervals found")
+    now = datetime.now()
+    first, last_iv = ivs[0], ivs[-1]
+    fresh_s = (now - last_iv.end).total_seconds()
+
+    outages = [iv for iv in ivs if iv.kind == "state"
+               and iv.lan == "UP" and iv.wan == "DOWN"]
+    gaps = [iv for iv in ivs if iv.kind == "gap"]
+    last_out = outages[-1] if outages else None
+    span = (last_iv.end - first.start).total_seconds()
+    coverage = ((span - sum(g.dur for g in gaps)) / span * 100) if span else 0
+
+    ongoing = (last_iv.kind == "state" and last_iv.lan == "UP"
+               and last_iv.wan == "DOWN" and fresh_s <= 600)
+    if fresh_s > 600:
+        colour, label = "#9e9e9e", "MONITOR STALE"
+        detail = (f"no sample for {fmt_dur(fresh_s)} "
+                  f"(monitoring machine asleep or monitor stopped)")
+    elif ongoing:
+        colour, label = "#c62828", "WAN DOWN"
+        detail = (f"outage in progress since {last_iv.start:%H:%M:%S}, "
+                  f"{fmt_dur((now - last_iv.start).total_seconds())} so far")
+    elif last_out and (now - last_out.end).total_seconds() < 86400:
+        colour, label = "#ef6c00", "UP (outage in last 24 h)"
+        detail = f"last sample {int(fresh_s)} s ago"
+    else:
+        colour, label = "#2e7d32", "UP"
+        detail = f"last sample {int(fresh_s)} s ago"
+
+    days = [(now - timedelta(days=i)).date() for i in range(13, -1, -1)]
+    day_down = {d: 0.0 for d in days}
+    for o in outages:
+        if o.start.date() in day_down:
+            day_down[o.start.date()] += o.dur
+    by_hour = [0] * 24
+    for o in outages:
+        by_hour[o.start.hour] += 1
+
+    if last_out:
+        last_out_txt = (f"{last_out.start:%a %d %b %H:%M:%S} · "
+                        f"down {fmt_dur(last_out.dur)} · ended "
+                        f"{fmt_dur((now - last_out.end).total_seconds())} ago")
+    else:
+        last_out_txt = "none recorded"
+
+    rows = "".join(
+        f"<tr><td>{o.start:%a %d %b %H:%M:%S}</td>"
+        f"<td>{fmt_dur(o.dur)}</td></tr>"
+        for o in reversed(outages[-12:])) or         "<tr><td colspan=2>none recorded</td></tr>"
+
+    live_badge = ""
+    if getattr(args, "badge", ""):
+        live_badge = (
+            "<div style='float:right;text-align:right'>"
+            f"<img src='{args.badge}' alt='live status' height='22'>"
+            "<div style='font-size:.7rem;color:#9e9e9e'>"
+            "live - updates even when this page is stale</div></div>")
+
+    html = ("<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta http-equiv='refresh' content='300'>"
+            "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>wanwatch status</title>" + _REPORT_STYLE + "</head><body>"
+            + live_badge +
+            f"<span class='badge' style='background:{colour}'>{label}</span>"
+            f"<div class='detail'>{detail}</div>"
+            "<div class='cards'>"
+            f"<div class='card'><b>{len(outages)}</b>"
+            "<span>WAN outages recorded</span></div>"
+            f"<div class='card'><b>{fmt_dur(sum(o.dur for o in outages))}</b>"
+            "<span>total downtime</span></div>"
+            f"<div class='card'><b>{coverage:.1f}%</b>"
+            "<span>monitoring coverage</span></div>"
+            "</div>"
+            f"<h3>Last outage</h3><div>{last_out_txt}</div>"
+            f"<h3>Daily downtime, last 14 days "
+            f"({days[0]:%d %b} – {days[-1]:%d %b})</h3>"
+            f"{_svg_bars([day_down[d] for d in days])}"
+            "<h3>Outages by hour of day (00–23)</h3>"
+            f"{_svg_bars(by_hour, color='#ef6c00')}"
+            "<h3>Recent outages</h3>"
+            f"<table><tr><th>started</th><th>duration</th></tr>{rows}</table>"
+            f"<div class='note'>Generated {now:%a %d %b %Y %H:%M:%S} "
+            f"(local Irish time). Static read-only page, republished every "
+            f"~10 minutes; data window {first.start:%d %b} – "
+            f"{last_iv.end:%d %b %H:%M}. Page auto-reloads every 5 min.</div>"
+            + _STALE_JS.replace("__EPOCH__", str(int(now.timestamp())))
+            + "</body></html>")
+
+    with open(args.output, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"wrote {args.output}")
+
+
 # ------------------------------------------------------------------- main
 
 def main():
@@ -460,6 +617,15 @@ def main():
                    help="minimum visual width for outage blocks, minutes "
                         "(default 2)")
     p.set_defaults(func=cmd_plot)
+
+    p = sub.add_parser("report",
+                       help="render a static, read-only HTML status page")
+    p.add_argument("files", nargs="+")
+    p.add_argument("-o", "--output", default="wan_status.html")
+    p.add_argument("--badge", default="",
+                   help="URL of a live status badge image to embed")
+    p.set_defaults(func=cmd_report)
+
 
     args = ap.parse_args()
     args.func(args)

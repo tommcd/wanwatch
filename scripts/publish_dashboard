@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# publish_dashboard - render the wanwatch status page and push it to the
+# 'dashboard' branch, which GitHub Pages serves as a read-only static site.
+#
+# Outbound-only by design: this machine pushes; viewers talk to GitHub,
+# never to this machine. The branch is rebuilt as a single commit each
+# run (force push), so it never accumulates history.
+#
+# Usage: ./scripts/publish_dashboard   (or via the WAN Dashboard task)
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[[ -f "$HOME/.wanwatch.env" ]] && source "$HOME/.wanwatch.env"
+LOG="${WANWATCH_LOG:-$HOME/wan_log.csv}"
+COND="${WANWATCH_CONDENSED:-$REPO/wan_condensed.csv}"
+REMOTE="$(git -C "$REPO" remote get-url origin)"
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# Render (pass both history archive and live log; report tolerates a
+# missing file, e.g. right after a compact)
+( cd "$REPO" && uv run wanwatch report "$COND" "$LOG" -o "$TMP/index.html" \
+      ${WANWATCH_BADGE_URL:+--badge "$WANWATCH_BADGE_URL"} )
+
+cd "$TMP"
+git init -q -b dashboard
+git add index.html
+git -c user.name=wanwatch -c user.email=wanwatch@localhost \
+    commit -qm "dashboard $(date '+%Y-%m-%d %H:%M:%S')"
+git push -qf "$REMOTE" dashboard
+
+echo "published $(date '+%H:%M:%S') -> ${REMOTE%.git} (branch: dashboard)"
