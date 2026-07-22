@@ -551,6 +551,18 @@ def cmd_report(args):
             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
             "<title>wanwatch status</title>" + _REPORT_STYLE + "</head><body>"
             + live_badge +
+            "<h1 style='margin:.2rem 0;font-size:1.5rem'>"
+            "Broadband connection monitor</h1>"
+            "<p style='color:#616161;margin:.2rem 0 1rem;max-width:52ch'>"
+            "Automated uptime monitoring of a home fibre connection "
+            "(eir Fibre, <a href='https://www.eir.ie/support/' "
+            "style='color:#1565c0'>eir support</a>). A script on the "
+            "line pings the router and the public internet every 10 "
+            "seconds and records every outage. The badge top-right is "
+            "fetched live from healthchecks.io on each visit, so it "
+            "shows the connection’s status right now even if the rest "
+            "of this page is a few minutes old — refresh to update "
+            "everything else.</p>" +
             f"<span class='badge' style='background:{colour}'>{label}</span>"
             f"<div class='detail'>{detail}</div>"
             "<div class='cards'>"
@@ -572,7 +584,7 @@ def cmd_report(args):
             f"<div class='note'>Generated {now:%a %d %b %Y %H:%M:%S} "
             f"(local Irish time). Static read-only page, republished every "
             f"~10 minutes; data window {first.start:%d %b} – "
-            f"{last_iv.end:%d %b %H:%M}. Page auto-reloads every 5 min.</div>"
+            f"{last_iv.end:%d %b %H:%M}. Page auto-reloads every 5 min. ""<a href='https://github.com/tommcd/wanwatch' style='color:#9e9e9e'>Source and methodology on GitHub</a>.</div>"
             + _STALE_JS.replace("__EPOCH__", str(int(now.timestamp())))
             + "</body></html>")
 
