@@ -22,6 +22,11 @@ evidence that ends that conversation.
 Runs on Linux, macOS, and Windows (via Git Bash). Windows gets full
 lifecycle management including a self-healing Task Scheduler watchdog.
 
+> **Setting up the full continuous-monitoring system** (sampler +
+> public GitHub Pages dashboard + dead-man's-switch heartbeat)? See
+> the [**runbook**](RUNBOOK.md) for step-by-step setup, verification,
+> and teardown. The sections below cover the analysis CLI itself.
+
 ## Install
 
 Requires [uv](https://docs.astral.sh/uv/) and, on Windows, Git for
