@@ -66,7 +66,9 @@ while true; do
     # heartbeat to the hosted dead-man's switch: sent only while the
     # WAN is up, so silence there = connection (or machine) down
     if [[ -n "$PING_URL" && "$wan" == UP ]] && (( now - last_ping >= 60 )); then
-        curl -sfm 5 "$PING_URL" >/dev/null 2>&1 && last_ping=$now
+        # detached so the heartbeat never blocks the loop or flashes a window
+        ( curl -sfm 5 "$PING_URL" >/dev/null 2>&1 & disown ) 2>/dev/null
+        last_ping=$now
     fi
 
     sleep "$INTERVAL"

@@ -199,6 +199,37 @@ def parse_excludes(specs) -> list:
     return out
 
 
+def load_annotations(path):
+    """Read start,end,label,type rows. Returns [(start,end,label,type)]."""
+    if not path or not os.path.exists(path):
+        return []
+    out = []
+    with open(path, newline="", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.lower().startswith("start,"):
+                continue
+            parts = [p.strip() for p in line.split(",", 3)]
+            if len(parts) < 4:
+                continue
+            try:
+                a, b = _pt(parts[0]), _pt(parts[1])
+            except ValueError:
+                continue
+            typ = parts[3].lower()
+            out.append((a, b, parts[2], typ if typ in ("excluded", "explained")
+                        else "explained"))
+    return out
+
+
+def annotate(iv, annotations):
+    """Return (label, type) for the first annotation overlapping iv, else None."""
+    for a, b, label, typ in annotations:
+        if iv.start < b and iv.end > a:
+            return label, typ
+    return None
+
+
 def overlaps_exclude(iv: Interval, excludes) -> bool:
     return any(iv.start < b and iv.end > a for a, b in excludes)
 
@@ -217,9 +248,14 @@ def cmd_analyze(args):
     gaps = [iv for iv in ivs if iv.kind == "gap"]
     gap_total = sum(g.dur for g in gaps)
 
+    annotations = load_annotations(args.annotations)
+
     outs_all = [iv for iv in ivs if iv.kind == "state"
                 and iv.lan == "UP" and iv.wan == "DOWN"]
-    excluded = [iv for iv in outs_all if overlaps_exclude(iv, excludes)]
+    ann_excluded = [iv for iv in outs_all
+                    if (annotate(iv, annotations) or (None, ""))[1] == "excluded"]
+    excluded = [iv for iv in outs_all
+                if overlaps_exclude(iv, excludes) or iv in ann_excluded]
     outages = [iv for iv in outs_all if iv not in excluded]
     lan_down = [iv for iv in ivs if iv.kind == "state" and iv.lan == "DOWN"]
 
@@ -261,19 +297,44 @@ def cmd_analyze(args):
 
         print("\n  full list:")
         for o in outages:
+            a = annotate(o, annotations)
+            tag = f"  [{a[0]}]" if a else ""
             print(f"    {o.start:%Y-%m-%d %H:%M:%S}  "
-                  f"down {fmt_dur(o.dur):>8}")
+                  f"down {fmt_dur(o.dur):>8}{tag}")
 
     if excluded:
-        print(f"\nEXCLUDED (deliberate downtime windows): {len(excluded)} "
+        print(f"\nEXCLUDED (deliberate downtime / annotated): {len(excluded)} "
               f"outage intervals, {fmt_dur(sum(o.dur for o in excluded))} "
               f"- not counted above")
+        for o in excluded:
+            a = annotate(o, annotations)
+            if a:
+                print(f"    {o.start:%Y-%m-%d %H:%M:%S}  "
+                      f"{fmt_dur(o.dur):>8}  [{a[0]}]")
     if lan_down:
-        print(f"\nLAN-DOWN periods (monitor could not reach the router): "
-              f"{len(lan_down)}, total {fmt_dur(sum(i.dur for i in lan_down))}")
-        for i in lan_down:
-            print(f"    {i.start:%Y-%m-%d %H:%M:%S}  lan={i.lan} wan={i.wan}  "
-                  f"({fmt_dur(i.dur)})")
+        # A local router reboot takes the router itself down, so the monitor
+        # (wired to it) loses the LAN - this is how a reboot is distinguished
+        # from an ISP outage, where only the WAN drops. Cluster nearby
+        # LAN-down intervals into single reboot events for a readable count.
+        clusters = []
+        for i in sorted(lan_down, key=lambda x: x.start):
+            if clusters and (i.start - clusters[-1][-1].end).total_seconds() <= 300:
+                clusters[-1].append(i)
+            else:
+                clusters.append([i])
+        print(f"\nPROBABLE LOCAL REBOOTS / RESTARTS "
+              f"(router unreachable - NOT counted as WAN outages): "
+              f"{len(clusters)} event(s), "
+              f"{fmt_dur(sum(i.dur for i in lan_down))} total")
+        for c in clusters:
+            a = annotate(c[0], annotations)
+            tag = f"  [{a[0]}]" if a else ""
+            span = fmt_dur((c[-1].end - c[0].start).total_seconds())
+            print(f"    {c[0].start:%Y-%m-%d %H:%M:%S}  ~{span}"
+                  f"  ({len(c)} LAN-down sample(s)){tag}")
+        print("    (These are local events - a router reboot or the monitoring "
+              "machine\n     restarting - and are excluded from the WAN outage "
+              "count above.)")
 
 
 # --------------------------------------------------------------- condense
@@ -608,6 +669,13 @@ def main():
     p.add_argument("--exclude", action="append", metavar="'A..B'",
                    help=f"exclude a deliberate-downtime window, "
                         f"timestamps as '{TS_FMT}..{TS_FMT}' (repeatable)")
+    p.add_argument("--annotations",
+                   default=os.path.expanduser("~/wanwatch-annotations.csv"),
+                   help="CSV of known events (start,end,label,type); "
+                        "type 'excluded' drops self-inflicted outages from "
+                        "the count, 'explained' labels but keeps them. "
+                        "Default: ~/wanwatch-annotations.csv if present. "
+                        "Pass '' to disable.")
     p.set_defaults(func=cmd_analyze)
 
     p = sub.add_parser("condense", help="write a condensed interval file")

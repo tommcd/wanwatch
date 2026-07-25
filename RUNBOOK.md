@@ -187,6 +187,40 @@ page renders with no badge — everything else works.
 
 ---
 
+## Annotating known events
+
+The tool distinguishes causes two ways:
+
+**Automatically.** A local router reboot takes the router down, so the
+monitoring machine (wired to it) loses the LAN. These show as `lan=DOWN`
+and are already excluded from the WAN-outage count; `analyze` reports them
+under "PROBABLE LOCAL REBOOTS / RESTARTS". A genuine ISP outage leaves the
+router up (`lan=UP, wan=DOWN`) and is counted. No action needed - the LAN
+column tells them apart.
+
+**Manually,** for causes the data can't infer. Create
+`~/wanwatch-annotations.csv`:
+
+```
+start,end,label,type
+2026-07-18 02:29:00,2026-07-18 02:36:00,Windows Update reboot,excluded
+2026-07-17 20:49:52,2026-07-17 21:44:00,Confirmed ISP outage (ticket #123),explained
+```
+
+- `excluded` - drop this outage from the WAN count (self-inflicted).
+- `explained` - keep it counted, but label it in the output.
+
+`analyze` reads the file automatically if present; `--annotations PATH`
+overrides, `--annotations ""` disables. The file is data, not code - keep
+it out of the repo (it's gitignored).
+
+> Annotate narrowly. A reboot takes ~1 minute; don't draw a broad window
+> that swallows genuine outage either side of it. When in doubt, prefer the
+> un-annotated count - it's already correct, because reboots are excluded
+> via the LAN signal.
+
+---
+
 ## Verification checklist
 
 - [ ] `./scripts/wanctl status` → RUNNING, fresh sample
