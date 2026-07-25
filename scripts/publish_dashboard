@@ -26,6 +26,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 cd "$TMP"
 git init -q -b dashboard
+git config core.autocrlf false
 git add index.html
 git -c user.name=wanwatch -c user.email=wanwatch@localhost \
     commit -qm "dashboard $(date '+%Y-%m-%d %H:%M:%S')"
