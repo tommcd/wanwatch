@@ -4,6 +4,8 @@ Document periods when your router stays reachable but the internet is not - evid
 
 **Live demo dashboard:** [tommcd.github.io/wanwatch](https://tommcd.github.io/wanwatch/) - a real home fibre line, monitored continuously, updated every 10 minutes. Green/red status is fetched live on each visit.
 
+[![Buy Me a Coffee](https://img.shields.io/badge/☕_Buy_me_a_coffee-support-0d9488)](https://buymeacoffee.com/tommcd)
+
 `wanwatch` is a tiny two-part toolkit born from a real fault-hunt: an
 FTTH connection that silently dropped its WAN session dozens of times per
 evening while every LED in the house glowed a healthy green. The ISP's
