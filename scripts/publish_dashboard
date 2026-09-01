@@ -9,6 +9,8 @@
 # Usage: ./scripts/publish_dashboard   (or via the WAN Dashboard task)
 
 set -euo pipefail
+export GIT_TERMINAL_PROMPT=0
+export GCM_INTERACTIVE=never
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$HOME/.wanwatch.env" ]] && source "$HOME/.wanwatch.env"
