@@ -36,8 +36,12 @@ machine.
 1. **Git for Windows** (provides Git Bash). <https://git-scm.com/download/win>
 2. **uv**. <https://docs.astral.sh/uv/> — `curl -LsSf https://astral.sh/uv/install.sh | sh`
 3. A **GitHub account** and a fork/clone of this repo you can push to.
-4. *(Optional, for the live badge)* a free **healthchecks.io** account.
-5. The monitoring machine **wired to the router** (recommended — removes
+4. **Stored git credentials**, proven by pushing once by hand before the
+   publisher runs unattended. The scheduled task has no interactive desktop,
+   so it cannot answer a credential prompt — without a stored credential the
+   push blocks instead of failing (`git config --global credential.helper manager`).
+5. *(Optional, for the live badge)* a free **healthchecks.io** account.
+6. The monitoring machine **wired to the router** (recommended — removes
    Wi-Fi as a variable) and set to **never sleep on AC**, including the
    lid-close action (Settings → Power; verify the lid action too, it is a
    common ambush).
@@ -300,6 +304,7 @@ and healthchecks steps are identical.
 | `FileNotFoundError` on the raw log right after `compact` | Normal: `compact` rotates the file and the monitor recreates it on its next write. The tool skips missing files with a warning. |
 | Page loads but is stale / badge red | Working as designed during an outage — the badge is the live truth; the page catches up when the connection returns. |
 | Page never updates | Check the `WAN Dashboard` task result and `~/dashboard.log`; confirm `git push` works from that shell (credentials). |
+| Publish log shows `wrote` every run but never `published`; `bash` / `git-askpass` processes pile up into the hundreds | `git` is blocking on a credential prompt that no one can answer — there is no interactive desktop, so the invisible dialog waits forever and nothing errors. Store the credential (`git config --global credential.helper manager`, then push once interactively) and confirm `GIT_TERMINAL_PROMPT=0` is set in `scripts/publish_dashboard`. |
 | `LastTaskResult 0x800710E0` on the monitor task | The watchdog fired while an instance was already running and was refused — harmless (that's the "do not start a new instance" rule working). |
 | Console window flashes every minute | The per-minute heartbeat `curl`. Cosmetic. Raise the ping interval (script) + healthchecks Period to reduce it. |
 | Windows auto-reboot mid-run | The watchdog restarts the monitor within 5 min; consider pausing Windows Update or setting active hours during evidence-gathering. |
