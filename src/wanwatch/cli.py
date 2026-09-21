@@ -594,10 +594,17 @@ def cmd_report(args):
     else:
         last_out_txt = "none recorded"
 
-    rows = "".join(
+    longest = sorted(outages, key=lambda o: o.dur, reverse=True)[:8]
+    longest_rows = "".join(
         f"<tr><td>{o.start:%a %d %b %H:%M:%S}</td>"
         f"<td>{fmt_dur(o.dur)}</td></tr>"
-        for o in reversed(outages[-12:])) or         "<tr><td colspan=2>none recorded</td></tr>"
+        for o in longest) or "<tr><td colspan=2>none recorded</td></tr>"
+
+    recent_rows = "".join(
+        f"<tr><td>{o.start:%a %d %b %H:%M:%S}</td>"
+        f"<td>{fmt_dur(o.dur)}</td></tr>"
+        for o in reversed(outages[-12:])) or \
+        "<tr><td colspan=2>none recorded</td></tr>"
 
     live_badge = ""
     if getattr(args, "badge", ""):
@@ -640,8 +647,10 @@ def cmd_report(args):
             f"{_svg_bars([day_down[d] for d in days])}"
             "<h3>Outages by hour of day (00–23)</h3>"
             f"{_svg_bars(by_hour, color='#ef6c00')}"
+            "<h3>Longest outages</h3>"
+            f"<table><tr><th>started</th><th>duration</th></tr>{longest_rows}</table>"
             "<h3>Recent outages</h3>"
-            f"<table><tr><th>started</th><th>duration</th></tr>{rows}</table>"
+            f"<table><tr><th>started</th><th>duration</th></tr>{recent_rows}</table>"
             f"<div class='note'>Generated {now:%a %d %b %Y %H:%M:%S} "
             f"(local Irish time). Static read-only page, republished every "
             f"~10 minutes; data window {first.start:%d %b} – "
