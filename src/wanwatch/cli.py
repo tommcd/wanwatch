@@ -594,16 +594,25 @@ def cmd_report(args):
     else:
         last_out_txt = "none recorded"
 
-    longest = sorted(outages, key=lambda o: o.dur, reverse=True)[:8]
-    longest_rows = "".join(
+    largest_14d = sorted([o for o in outages if o.start.date() in day_down],
+                         key=lambda o: o.dur, reverse=True)[:10]
+    largest_14d_rows = "".join(
         f"<tr><td>{o.start:%a %d %b %H:%M:%S}</td>"
         f"<td>{fmt_dur(o.dur)}</td></tr>"
-        for o in longest) or "<tr><td colspan=2>none recorded</td></tr>"
+        for o in largest_14d) or \
+        "<tr><td colspan=2>None in the last 14 days</td></tr>"
 
     recent_rows = "".join(
         f"<tr><td>{o.start:%a %d %b %H:%M:%S}</td>"
         f"<td>{fmt_dur(o.dur)}</td></tr>"
-        for o in reversed(outages[-12:])) or \
+        for o in reversed(outages[-20:])) or \
+        "<tr><td colspan=2>none recorded</td></tr>"
+
+    largest_all = sorted(outages, key=lambda o: o.dur, reverse=True)[:10]
+    largest_all_rows = "".join(
+        f"<tr><td>{o.start:%a %d %b %H:%M:%S}</td>"
+        f"<td>{fmt_dur(o.dur)}</td></tr>"
+        for o in largest_all) or \
         "<tr><td colspan=2>none recorded</td></tr>"
 
     live_badge = ""
@@ -647,10 +656,18 @@ def cmd_report(args):
             f"{_svg_bars([day_down[d] for d in days])}"
             "<h3>Outages by hour of day (00–23)</h3>"
             f"{_svg_bars(by_hour, color='#ef6c00')}"
-            "<h3>Longest outages</h3>"
-            f"<table><tr><th>started</th><th>duration</th></tr>{longest_rows}</table>"
+            "<h3>Largest outages, last 14 days</h3>"
+            "<div class='detail' style='margin:.1rem 0 .6rem;font-size:.85rem'>"
+            "Worst outages in the last two weeks</div>"
+            f"<table><tr><th>started</th><th>duration</th></tr>{largest_14d_rows}</table>"
             "<h3>Recent outages</h3>"
+            "<div class='detail' style='margin:.1rem 0 .6rem;font-size:.85rem'>"
+            "Every recorded outage, newest first</div>"
             f"<table><tr><th>started</th><th>duration</th></tr>{recent_rows}</table>"
+            "<h3>Largest outages, all time</h3>"
+            "<div class='detail' style='margin:.1rem 0 .6rem;font-size:.85rem'>"
+            "Worst outages ever recorded</div>"
+            f"<table><tr><th>started</th><th>duration</th></tr>{largest_all_rows}</table>"
             f"<div class='note'>Generated {now:%a %d %b %Y %H:%M:%S} "
             f"(local Irish time). Static read-only page, republished every "
             f"~10 minutes; data window {first.start:%d %b} – "
