@@ -16,7 +16,10 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -f "$HOME/.wanwatch.env" ]] && source "$HOME/.wanwatch.env"
 LOG="${WANWATCH_LOG:-$HOME/wan_log.csv}"
 COND="${WANWATCH_CONDENSED:-$REPO/wan_condensed.csv}"
-REMOTE="$(git -C "$REPO" remote get-url origin)"
+REMOTE="${WANWATCH_PUSH_URL:-$(git -C "$REPO" remote get-url origin)}"
+if [[ -n "${WANWATCH_SSH_KEY:-}" ]]; then
+    export GIT_SSH_COMMAND="ssh -i $WANWATCH_SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
